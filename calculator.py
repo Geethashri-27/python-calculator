@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# calculator.py
+# fixed typo error
 
 def add(a, b):
     return a + b
