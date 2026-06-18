@@ -1,0 +1,102 @@
+name: PR Review Bot
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+jobs:
+  pr-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Generate PR Review Report
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch origin "$BASE_REF"
+          BASE="origin/$BASE_REF"
+          FILES_CHANGED=$(git diff --name-only "$BASE" HEAD | wc -l)
+          ADDED=$(git diff --numstat "$BASE" HEAD | awk '{a+=$1} END {print a+0}')
+          REMOVED=$(git diff --numstat "$BASE" HEAD | awk '{r+=$2} END {print r+0}')
+          git diff --name-only "$BASE" HEAD > changed_files.txt
+          # Find TODO / FIXME comments
+          > todos.txt
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              grep -nH -E "TODO|FIXME" "$file" >> todos.txt || true
+            fi
+          done < changed_files.txt
+          # Build markdown diff statistics table
+          echo "| File | Changes |" > diff_table.md
+          echo "|------|---------|" >> diff_table.md
+          git diff --stat "$BASE" HEAD | while read -r line; do
+            # Skip the trailing summary line (e.g. "3 files changed, 10 insertions(+)"),
+            # which has no "|" separator and would otherwise duplicate into both columns.
+            if echo "$line" | grep -q '|'; then
+              FILE=$(echo "$line" | sed 's/|.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              CHANGES=$(echo "$line" | sed 's/.*|//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              echo "| $FILE | $CHANGES |" >> diff_table.md
+            fi
+          done
+          cat > comment.md << PR_REVIEW_BOT_HEREDOC_MARKER
+          <!-- PR_REVIEW_BOT -->
+          # 🤖 Automated PR Review
+          ## Summary
+          | Metric | Value |
+          |--------|-------|
+          | Files Changed | $FILES_CHANGED |
+          | Lines Added | $ADDED |
+          | Lines Removed | $REMOVED |
+          ## TODO / FIXME Findings
+          \`\`\`
+          $(cat todos.txt 2>/dev/null || echo "None found")
+          \`\`\`
+          ## Diff Statistics
+          $(cat diff_table.md)
+          PR_REVIEW_BOT_HEREDOC_MARKER
+      - name: Create or Update PR Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('comment.md', 'utf8');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner,
+                repo,
+                issue_number
+              }
+            );
+            const existingComment = comments.find(comment =>
+              comment.body &&
+              comment.body.includes('PR_REVIEW_BOT')
+            );
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existingComment.id,
+                body
+              });
+              console.log('Updated existing PR review comment.');
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+              console.log('Created new PR review comment.');
+            }
